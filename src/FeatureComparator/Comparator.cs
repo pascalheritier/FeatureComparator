@@ -91,6 +91,7 @@ namespace FeatureComparator
                 }
 
                 Dictionary<string, IEnumerable<Issue>> missingFeaturesDictionary = new();
+                Dictionary<string, IEnumerable<string>> unknownFeaturesDictionary = new();
 
                 // compare features
                 foreach (GitRepositoryComparison gitRepository in _appConfiguration.GitConfiguration.GitRepositoryComparisons)
@@ -104,18 +105,19 @@ namespace FeatureComparator
                     IEnumerable<Commit> commitsCompareFrom = GetMergingCommits(gitRepository.RepositoryName, gitRepository.CommitStartSha, gitRepository.CompareFrom.BranchName, repositoryCompareFrom);
                     IEnumerable<Commit> commitsCompareTo = GetMergingCommits(gitRepository.RepositoryName, gitRepository.CommitStartSha, gitRepository.CompareTo.BranchName, repositoryCompareTo);
 
-                    IList<Issue> featuresCompareFrom = GetFeatures(GetRepositoryCompareFromName(gitRepository.RepositoryName), commitsCompareFrom);
-                    IList<Issue> featuresCompareTo = GetFeatures(GetRepositoryCompareToName(gitRepository.RepositoryName), commitsCompareTo);
+                    IList<Issue> featuresCompareFrom = GetFeatures(GetRepositoryCompareFromName(gitRepository.RepositoryName), commitsCompareFrom, out IList<string> unknownFeatures);
+                    IList<Issue> featuresCompareTo = GetFeatures(GetRepositoryCompareToName(gitRepository.RepositoryName), commitsCompareTo, out _);
 
-                    IEnumerable<Issue> featuresMissing = featuresCompareFrom.Where(issueFrom => !featuresCompareTo.Any(issueTo => issueTo.Id == issueFrom.Id));
+                    IEnumerable<Issue> missingFeatures = featuresCompareFrom.Where(issueFrom => !featuresCompareTo.Any(issueTo => issueTo.Id == issueFrom.Id));
 
-                    missingFeaturesDictionary.Add(gitRepository.RepositoryName, featuresMissing);
+                    missingFeaturesDictionary.Add(gitRepository.RepositoryName, missingFeatures);
+                    unknownFeaturesDictionary.Add(gitRepository.RepositoryName, unknownFeatures);
 
                     _logger.LogInformation($"End comparing features for git repo '{gitRepository.RepositoryName}', from branch '{gitRepository.CompareFrom.BranchName}' to branch '{gitRepository.CompareTo.BranchName}':");
                 }
 
                 // generate file
-                GenerateComparisonNote(_appConfiguration.RedmineConfiguration.ComparisonNoteFileName, missingFeaturesDictionary);
+                GenerateComparisonNote(_appConfiguration.RedmineConfiguration.ComparisonNoteFileName, missingFeaturesDictionary, unknownFeaturesDictionary);
             }
             catch (Exception ex)
             {
@@ -172,18 +174,20 @@ namespace FeatureComparator
             return commits.Where(_C => _C.Author.When >= startCommit.Author.When);
         }
 
-        private IList<Issue> GetFeatures(string gitRepositoryName, IEnumerable<Commit> sortedCommits)
+        private IList<Issue> GetFeatures(string gitRepositoryName, IEnumerable<Commit> sortedCommits, out IList<string> unkownFeatures)
         {
-            List<Issue> issues = new();
+            List<Issue> features = new();
+            unkownFeatures = new List<string>();
             foreach (Commit commit in sortedCommits)
             {
                 if (!TryGetRedmineIssueNumber(commit.Message, out string redmineIssueId, out string mergeMessage))
                 {
-                    _logger.LogWarning($"Repository '{gitRepositoryName}': Could not find redmine issue for merge commit: {commit.Message}. Generator will skip this.");
+                    _logger.LogWarning($"Repository '{gitRepositoryName}': Could not find redmine issue for merge commit: {commit.Message}.");
+                    unkownFeatures.Add(commit.MessageShort);
                     continue;
                 }
 
-                if (!issues.Any(_I => _I.Id.ToString() == redmineIssueId))
+                if (!features.Any(_I => _I.Id.ToString() == redmineIssueId))
                 {
                     Issue? foundIssue = null;
                     // check if already retrieved from redmine otherwise get it online
@@ -206,12 +210,12 @@ namespace FeatureComparator
 
                     if (foundIssue is not null)
                     {
-                        issues.Add(foundIssue);
+                        features.Add(foundIssue);
                         _logger.LogInformation($"- {commit.Author.When}| {this.IssueToString(foundIssue)}");
                     }
                 }
             }
-            return issues;
+            return features;
         }
 
         #region Git helpers
@@ -402,7 +406,10 @@ namespace FeatureComparator
             return $" - {foundIssue.Tracker.Name} #{foundIssue.Id}: {foundIssue.Subject}";
         }
 
-        private void GenerateComparisonNote(string comparisonNotefileName, Dictionary<string, IEnumerable<Issue>> missingFeaturesDictionary)
+        private void GenerateComparisonNote(
+            string comparisonNotefileName,
+            IDictionary<string, IEnumerable<Issue>> missingFeaturesDictionary,
+            IDictionary<string, IEnumerable<string>> unknownFeaturesDictionary)
         {
             if (System.IO.File.Exists(comparisonNotefileName))
                 System.IO.File.Delete(comparisonNotefileName);
@@ -419,6 +426,13 @@ namespace FeatureComparator
                     foreach (Issue redmineIssue in missingFeaturesDictionary[gitRepoName].OrderBy(_I => _I.Tracker.Name))
                     {
                         content += this.IssueToString(redmineIssue);
+                        content += Environment.NewLine;
+                    }
+                    content += $"- Unknown features:";
+                    content += Environment.NewLine;
+                    foreach (string unknownFeature in unknownFeaturesDictionary[gitRepoName])
+                    {
+                        content += $" - {unknownFeature}";
                         content += Environment.NewLine;
                     }
                     content += Environment.NewLine;
