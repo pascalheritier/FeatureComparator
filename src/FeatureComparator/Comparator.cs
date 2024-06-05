@@ -12,12 +12,15 @@ using System.Text.RegularExpressions;
 
 namespace FeatureComparator
 {
-    internal class Generator
+    internal class Comparator
     {
         #region Consts
 
         private const string GitRepositoryExtension = ".git";
         private const string RemoteBranchPrefix = "origin/";
+
+        private const string CompareFromFolderName = "from";
+        private const string CompareToFolderName = "to";
 
         #endregion
 
@@ -29,16 +32,16 @@ namespace FeatureComparator
         private string _password;
         private AppConfiguration _appConfiguration;
         private RedmineManager _manager;
-        private Dictionary<string, List<Issue>> _issueDictionary = new();
+        private Dictionary<string, Issue> _redmineIssueDictionary = new();
         private Dictionary<string, Repository> _gitRepositoryDictionary = new();
 
         #endregion
 
         #region Constructor
-        public Generator(AppConfiguration appConfiguration, ILoggerFactory loggerFactory)
+        public Comparator(AppConfiguration appConfiguration, ILoggerFactory loggerFactory)
         {
             _appConfiguration = appConfiguration;
-            _logger = loggerFactory.CreateLogger<Generator>();
+            _logger = loggerFactory.CreateLogger<Comparator>();
             _repoCloneTmpDirectory = appConfiguration.GitConfiguration.RepoCloneTmpDirectory;
             _username = appConfiguration.GitConfiguration.Username;
             _password = appConfiguration.GitConfiguration.PAT;
@@ -64,91 +67,151 @@ namespace FeatureComparator
                 };
 
                 // pull or clone git repository
-                foreach (GitRepository gitRepository in _appConfiguration.GitConfiguration.GitRepositories)
+                foreach (GitRepositoryComparison gitRepository in _appConfiguration.GitConfiguration.GitRepositoryComparisons)
                 {
-                    Repository repository = CloneOrPullRepository(
-                        gitRepository.Name, 
-                        gitRepository.BranchName, 
-                        GetRepositoryGitTempPath(gitRepository.Name),
-                        GetRepositoryUrl(gitRepository.Name), 
+                    // pull compareFrom branch
+                    string repositoryCompareFromName = GetRepositoryCompareFromName(gitRepository.RepositoryName);
+                    Repository repositoryCompareFrom = CloneOrPullRepository(
+                        gitRepository.RepositoryName,
+                        gitRepository.CompareFrom.BranchName,
+                        GetRepositoryGitTempPath(repositoryCompareFromName),
+                        GetRepositoryUrl(gitRepository.RepositoryName),
                         credentials);
-                    _gitRepositoryDictionary.Add(gitRepository.Name, repository);
+                    _gitRepositoryDictionary.Add(repositoryCompareFromName, repositoryCompareFrom);
+
+                    // pull compareTo branch
+                    string repositoryCompareToName = GetRepositoryCompareToName(gitRepository.RepositoryName);
+                    Repository repositoryCompareTo = CloneOrPullRepository(
+                        gitRepository.RepositoryName,
+                        gitRepository.CompareFrom.BranchName,
+                        GetRepositoryGitTempPath(repositoryCompareToName),
+                        GetRepositoryUrl(gitRepository.RepositoryName),
+                        credentials);
+                    _gitRepositoryDictionary.Add(repositoryCompareToName, repositoryCompareTo);
                 }
 
-                // get release note data
-                foreach (GitRepository gitRepository in _appConfiguration.GitConfiguration.GitRepositories)
+                Dictionary<string, IEnumerable<Issue>> missingFeaturesDictionary = new();
+
+                // compare features
+                foreach (GitRepositoryComparison gitRepository in _appConfiguration.GitConfiguration.GitRepositoryComparisons)
                 {
-                    _logger.LogInformation($"Start retrieving release note data for git repo '{gitRepository.Name}' in branch '{gitRepository.BranchName}':");
+                    _logger.LogInformation($"Start comparing features for git repo '{gitRepository.RepositoryName}', from branch '{gitRepository.CompareFrom.BranchName}' to branch '{gitRepository.CompareTo.BranchName}':");
 
-                    if (!_gitRepositoryDictionary.ContainsKey(gitRepository.Name))
-                        throw new NotFoundException("Dictionaries not properly initialized");
-                    Repository repository = _gitRepositoryDictionary[gitRepository.Name];
+                    using Repository repositoryCompareFrom = GetRepositoryCompareFrom(gitRepository.RepositoryName);
+                    using Repository repositoryCompareTo = GetRepositoryCompareTo(gitRepository.RepositoryName);
 
-                    if (!_issueDictionary.ContainsKey(gitRepository.Name))
-                        _issueDictionary.Add(gitRepository.Name, new List<Issue>());
+                    // get merge commits
+                    IEnumerable<Commit> commitsCompareFrom = GetMergingCommits(gitRepository.RepositoryName, gitRepository.CommitStartSha, gitRepository.CompareFrom.BranchName, repositoryCompareFrom);
+                    IEnumerable<Commit> commitsCompareTo = GetMergingCommits(gitRepository.RepositoryName, gitRepository.CommitStartSha, gitRepository.CompareTo.BranchName, repositoryCompareTo);
 
-                    // Get merge commits and generate release note
-                    using (repository)
-                    {
-                        var branch = repository.Branches.FirstOrDefault(_B => _B.FriendlyName.Contains(gitRepository.BranchName));
-                        if (branch == null)
-                        {
-                            _logger.LogError($"Repository '{gitRepository.Name}': Branch '{gitRepository.BranchName}' not found in repository {GetRepositoryUrl(gitRepository.Name)}.");
-                            return;
-                        }
+                    IList<Issue> featuresCompareFrom = GetFeatures(GetRepositoryCompareFromName(gitRepository.RepositoryName), commitsCompareFrom);
+                    IList<Issue> featuresCompareTo = GetFeatures(GetRepositoryCompareToName(gitRepository.RepositoryName), commitsCompareTo);
 
-                        CommitFilter filter = new CommitFilter()
-                        {
-                            SortBy = CommitSortStrategies.Time,
-                            IncludeReachableFrom = branch
-                        };
+                    IEnumerable<Issue> featuresMissing = featuresCompareFrom.Where(issueFrom => !featuresCompareTo.Any(issueTo => issueTo.Id == issueFrom.Id));
 
-                        IEnumerable<Commit> commits = repository.Commits
-                            .QueryBy(filter)
-                            .Where(c => c.Parents.Count() > 1
-                            && c.Message.Contains($"into '{gitRepository.BranchName}'"));
+                    missingFeaturesDictionary.Add(gitRepository.RepositoryName, featuresMissing);
 
-                        Commit? startCommit = repository.Commits.FirstOrDefault(_C => _C.Sha == gitRepository.CommitStartSha);
-                        if (startCommit == null)
-                        {
-                            _logger.LogError($"Repository '{gitRepository.Name}': Could not find start commit with SHA {gitRepository.CommitStartSha}, which will be skipped during generation.");
-                            continue;
-                        }
-
-                        IEnumerable<Commit> sortedCommits = commits.Where(_C => _C.Author.When >= startCommit.Author.When);
-                        foreach (Commit commit in sortedCommits)
-                        {
-                            if (!TryGetRedmineIssueNumber(commit.Message, out string redmineIssueId, out string mergeMessage))
-                            {
-                                _logger.LogWarning($"Repository '{gitRepository.Name}': Could not find redmine issue for merge commit: {commit.Message}. Generator will skip this.");
-                                continue;
-                            }
-
-                            if (!_issueDictionary[gitRepository.Name].Any(_I => _I.Id.ToString() == redmineIssueId))
-                            {
-                                if (!this.TryGetIssueFromOpenIssues(redmineIssueId, out Issue? foundIssue) || foundIssue is null)
-                                    if (!this.TryGetIssueFromClosedIssues(redmineIssueId, out foundIssue) || foundIssue is null)
-                                        _logger.LogError($"Repository '{gitRepository.Name}': Could not find Redmine issue #{redmineIssueId}");
-
-                                if(foundIssue is not null)
-                                {
-                                    _issueDictionary[gitRepository.Name].Add(foundIssue);
-                                    _logger.LogInformation($"- {commit.Author.When}| {this.IssueToReleaseNote(foundIssue)}");
-                                }
-                            }
-                        }
-                    }
-
-                    _logger.LogInformation($"End of retrieving release note data for git repo '{gitRepository.Name}' in branch '{gitRepository.BranchName}'.");
+                    _logger.LogInformation($"End comparing features for git repo '{gitRepository.RepositoryName}', from branch '{gitRepository.CompareFrom.BranchName}' to branch '{gitRepository.CompareTo.BranchName}':");
                 }
 
-                // generate release note file
-                this.GenerateRedmineReleaseNote(_appConfiguration.RedmineConfiguration.ReleaseNoteFileName);
+                // generate file
+                GenerateComparisonNote(_appConfiguration.RedmineConfiguration.ComparisonNoteFileName, missingFeaturesDictionary);
             }
             catch (Exception ex)
             {
                 _logger.LogError($"Error while accessing git repository: {ex.ToString()}");
             }
+        }
+
+        private Repository GetRepositoryCompareFrom(string gitRepositoryName)
+        {
+            string repositoryFromName = GetRepositoryCompareFromName(gitRepositoryName);
+            return GetRepository(repositoryFromName);
+        }
+
+        private Repository GetRepositoryCompareTo(string gitRepositoryName)
+        {
+            string repositoryToName = GetRepositoryCompareToName(gitRepositoryName);
+            return GetRepository(repositoryToName);
+        }
+
+        private Repository GetRepository(string gitRepositoryNameKey)
+        {
+            if (!_gitRepositoryDictionary.ContainsKey(gitRepositoryNameKey))
+                throw new NotFoundException("Dictionaries not properly initialized");
+            return _gitRepositoryDictionary[gitRepositoryNameKey];
+        }
+
+        private IEnumerable<Commit> GetMergingCommits(string gitRepositoryName, string gitCommitStartSha, string gitBranchName, Repository gitRepository)
+        {
+            var branch = gitRepository.Branches.FirstOrDefault(_B => _B.FriendlyName.Contains(gitBranchName));
+            if (branch == null)
+            {
+                _logger.LogError($"Repository '{gitRepositoryName}': Branch '{gitBranchName}' not found in repository {GetRepositoryUrl(gitRepositoryName)}.");
+                return Enumerable.Empty<Commit>();
+            }
+
+            CommitFilter filter = new CommitFilter()
+            {
+                SortBy = CommitSortStrategies.Time,
+                IncludeReachableFrom = branch
+            };
+
+            IEnumerable<Commit> commits = gitRepository.Commits
+                .QueryBy(filter)
+                .Where(c => c.Parents.Count() > 1
+                && c.Message.Contains($"into '{gitBranchName}'"));
+
+            Commit? startCommit = gitRepository.Commits.FirstOrDefault(_C => _C.Sha == gitCommitStartSha);
+            if (startCommit == null)
+            {
+                _logger.LogError($"Repository '{gitRepositoryName}': Could not find start commit with SHA {gitCommitStartSha}, which will be skipped during generation.");
+                return Enumerable.Empty<Commit>();
+            }
+
+            return commits.Where(_C => _C.Author.When >= startCommit.Author.When);
+        }
+
+        private IList<Issue> GetFeatures(string gitRepositoryName, IEnumerable<Commit> sortedCommits)
+        {
+            List<Issue> issues = new();
+            foreach (Commit commit in sortedCommits)
+            {
+                if (!TryGetRedmineIssueNumber(commit.Message, out string redmineIssueId, out string mergeMessage))
+                {
+                    _logger.LogWarning($"Repository '{gitRepositoryName}': Could not find redmine issue for merge commit: {commit.Message}. Generator will skip this.");
+                    continue;
+                }
+
+                if (!issues.Any(_I => _I.Id.ToString() == redmineIssueId))
+                {
+                    Issue? foundIssue = null;
+                    // check if already retrieved from redmine otherwise get it online
+                    if (_redmineIssueDictionary.ContainsKey(redmineIssueId))
+                    {
+                        foundIssue = _redmineIssueDictionary[redmineIssueId];
+                    }
+                    else if (this.TryGetIssueFromOpenIssues(redmineIssueId, out foundIssue))
+                    {
+                        _redmineIssueDictionary.Add(redmineIssueId, foundIssue!);
+                    }
+                    else if (this.TryGetIssueFromClosedIssues(redmineIssueId, out foundIssue))
+                    {
+                        _redmineIssueDictionary.Add(redmineIssueId, foundIssue!);
+                    }
+                    else
+                    {
+                        _logger.LogError($"Repository '{gitRepositoryName}': Could not find Redmine issue #{redmineIssueId}");
+                    }
+
+                    if (foundIssue is not null)
+                    {
+                        issues.Add(foundIssue);
+                        _logger.LogInformation($"- {commit.Author.When}| {this.IssueToString(foundIssue)}");
+                    }
+                }
+            }
+            return issues;
         }
 
         #region Git helpers
@@ -268,6 +331,16 @@ namespace FeatureComparator
             return Path.Combine(_repoCloneTmpDirectory, gitRepoName);
         }
 
+        private string GetRepositoryCompareFromName(string gitRepoName)
+        {
+            return Path.Combine(gitRepoName, CompareFromFolderName);
+        }
+
+        private string GetRepositoryCompareToName(string gitRepoName)
+        {
+            return Path.Combine(gitRepoName, CompareToFolderName);
+        }
+
         #endregion
 
         #region Redmine helpers
@@ -324,28 +397,28 @@ namespace FeatureComparator
             return false;
         }
 
-        private string IssueToReleaseNote(Issue foundIssue)
+        private string IssueToString(Issue foundIssue)
         {
             return $" - {foundIssue.Tracker.Name} #{foundIssue.Id}: {foundIssue.Subject}";
         }
 
-        private void GenerateRedmineReleaseNote(string releaseNotefileName)
+        private void GenerateComparisonNote(string comparisonNotefileName, Dictionary<string, IEnumerable<Issue>> missingFeaturesDictionary)
         {
-            if (System.IO.File.Exists(releaseNotefileName))
-                System.IO.File.Delete(releaseNotefileName);
+            if (System.IO.File.Exists(comparisonNotefileName))
+                System.IO.File.Delete(comparisonNotefileName);
 
-            using (FileStream fs = System.IO.File.Create(releaseNotefileName))
+            using (FileStream fs = System.IO.File.Create(comparisonNotefileName))
             {
                 string content;
-                foreach (string gitRepoName in _issueDictionary.Keys)
+                foreach (string gitRepoName in missingFeaturesDictionary.Keys)
                 {
                     content = $"## {gitRepoName.FirstCharToUpper()}";
                     content += Environment.NewLine;
-                    content += $"- {_appConfiguration.GitConfiguration.GitRepositories.First(_C => _C.Name == gitRepoName).ReleaseNoteVersion}";
+                    content += $"- Missing features:";
                     content += Environment.NewLine;
-                    foreach (Issue redmineIssue in _issueDictionary[gitRepoName].OrderBy(_I => _I.Tracker.Name))
+                    foreach (Issue redmineIssue in missingFeaturesDictionary[gitRepoName].OrderBy(_I => _I.Tracker.Name))
                     {
-                        content += this.IssueToReleaseNote(redmineIssue);
+                        content += this.IssueToString(redmineIssue);
                         content += Environment.NewLine;
                     }
                     content += Environment.NewLine;

@@ -7,6 +7,8 @@ using NLog;
 using NLog.Config;
 using NLog.Extensions.Logging;
 using FeatureComparator;
+using System.Runtime.CompilerServices;
+using System.Reflection;
 
 namespace GitCommitRetriever
 {
@@ -28,7 +30,7 @@ namespace GitCommitRetriever
                 IServiceCollection services = new ServiceCollection();
                 ConfigureServices(services);
                 IServiceProvider serviceProvider = services.BuildServiceProvider();
-                var runner = serviceProvider.GetRequiredService<Generator>();
+                var runner = serviceProvider.GetRequiredService<Comparator>();
                 runner.Run();
             }
             catch (Exception ex)
@@ -56,12 +58,12 @@ namespace GitCommitRetriever
                 loggingBuilder.SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Trace);
                 loggingBuilder.AddNLog(GetLogConfiguration());
             });
-            services.AddTransient<Generator>();
+            services.AddTransient<Comparator>();
         }
 
         private static LoggingConfiguration GetLogConfiguration()
         {
-            Stream stream = typeof(Program).Assembly.GetManifestResourceStream("ReleaseNoteGenerator." + LogConfigFileName)!;
+            Stream stream = typeof(Program).Assembly.GetManifestResourceStream(Assembly.GetExecutingAssembly().GetName().Name + "." + LogConfigFileName)!;
             string xml;
             using (var reader = new StreamReader(stream))
             {
