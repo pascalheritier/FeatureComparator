@@ -90,30 +90,16 @@ namespace FeatureComparator
                     _gitRepositoryDictionary.Add(repositoryCompareToName, repositoryCompareTo);
                 }
 
-                Dictionary<string, IEnumerable<Issue>> missingFeaturesDictionary = new();
-                Dictionary<string, IEnumerable<string>> unknownFeaturesDictionary = new();
+                Dictionary<string, IEnumerable<Issue>> missingFeaturesDictionary = new(); // features that are missing in the compareTo repository
+                Dictionary<string, IEnumerable<Issue>> unplannedMissingFeaturesDictionary = new(); // features that are missing in the compareTo repository and are unplanned for future development
+                Dictionary<string, IEnumerable<string>> unknownFeaturesDictionary = new(); // features merged in the compareFrom repository but that have no Redmine equivalence
 
-                // compare features
+                // compare features in each repository
                 foreach (GitRepositoryComparison gitRepository in _appConfiguration.GitConfiguration.GitRepositoryComparisons)
                 {
-                    _logger.LogInformation($"Start comparing features for git repo '{gitRepository.RepositoryName}', from branch '{gitRepository.CompareFrom.BranchName}' to branch '{gitRepository.CompareTo.BranchName}':");
-
-                    using Repository repositoryCompareFrom = GetRepositoryCompareFrom(gitRepository.RepositoryName);
-                    using Repository repositoryCompareTo = GetRepositoryCompareTo(gitRepository.RepositoryName);
-
-                    // get merge commits
-                    IEnumerable<Commit> commitsCompareFrom = GetMergingCommits(gitRepository.RepositoryName, gitRepository.CommitStartSha, gitRepository.CompareFrom.BranchName, repositoryCompareFrom);
-                    IEnumerable<Commit> commitsCompareTo = GetMergingCommits(gitRepository.RepositoryName, gitRepository.CommitStartSha, gitRepository.CompareTo.BranchName, repositoryCompareTo);
-
-                    IList<Issue> featuresCompareFrom = GetFeatures(GetRepositoryCompareFromName(gitRepository.RepositoryName), commitsCompareFrom, out IList<string> unknownFeatures);
-                    IList<Issue> featuresCompareTo = GetFeatures(GetRepositoryCompareToName(gitRepository.RepositoryName), commitsCompareTo, out _);
-
-                    IEnumerable<Issue> missingFeatures = featuresCompareFrom.Where(issueFrom => !featuresCompareTo.Any(issueTo => issueTo.Id == issueFrom.Id));
-
+                    CompareFeaturesInRepository(gitRepository, out IEnumerable<Issue> missingFeatures, out IList<string> unknownFeatures);
                     missingFeaturesDictionary.Add(gitRepository.RepositoryName, missingFeatures);
                     unknownFeaturesDictionary.Add(gitRepository.RepositoryName, unknownFeatures);
-
-                    _logger.LogInformation($"End comparing features for git repo '{gitRepository.RepositoryName}', from branch '{gitRepository.CompareFrom.BranchName}' to branch '{gitRepository.CompareTo.BranchName}':");
                 }
 
                 // generate file
@@ -123,6 +109,25 @@ namespace FeatureComparator
             {
                 _logger.LogError($"Error while accessing git repository: {ex.ToString()}");
             }
+        }
+
+        private void CompareFeaturesInRepository(GitRepositoryComparison gitRepository, out IEnumerable<Issue> missingFeatures, out IList<string> unknownFeatures)
+        {
+            _logger.LogInformation($"Start comparing features for git repo '{gitRepository.RepositoryName}', from branch '{gitRepository.CompareFrom.BranchName}' to branch '{gitRepository.CompareTo.BranchName}':");
+
+            using Repository repositoryCompareFrom = GetRepositoryCompareFrom(gitRepository.RepositoryName);
+            using Repository repositoryCompareTo = GetRepositoryCompareTo(gitRepository.RepositoryName);
+
+            // get merge commits
+            IEnumerable<Commit> commitsCompareFrom = GetMergingCommits(gitRepository.RepositoryName, gitRepository.CommitStartSha, gitRepository.CompareFrom.BranchName, repositoryCompareFrom);
+            IEnumerable<Commit> commitsCompareTo = GetMergingCommits(gitRepository.RepositoryName, gitRepository.CommitStartSha, gitRepository.CompareTo.BranchName, repositoryCompareTo);
+
+            IList<Issue> featuresCompareFrom = GetFeatures(GetRepositoryCompareFromName(gitRepository.RepositoryName), commitsCompareFrom, out unknownFeatures);
+            IList<Issue> featuresCompareTo = GetFeatures(GetRepositoryCompareToName(gitRepository.RepositoryName), commitsCompareTo, out _);
+
+            missingFeatures = featuresCompareFrom.Where(issueFrom => !featuresCompareTo.Any(issueTo => issueTo.Id == issueFrom.Id));
+
+            _logger.LogInformation($"End comparing features for git repo '{gitRepository.RepositoryName}', from branch '{gitRepository.CompareFrom.BranchName}' to branch '{gitRepository.CompareTo.BranchName}':");
         }
 
         private Repository GetRepositoryCompareFrom(string gitRepositoryName)
