@@ -12,6 +12,7 @@
         public string ApiKey { get; set; } = null!;
         public string TargetUserId { get; set; } = null!;
         public string ComparisonNoteFileName { get; set; } = null!;
+        public List<string> PlannedFeatureSubjects { get; set; } = null!;
     }
 
     internal class GitConfiguration

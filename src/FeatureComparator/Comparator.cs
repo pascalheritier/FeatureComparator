@@ -98,12 +98,14 @@ namespace FeatureComparator
                 foreach (GitRepositoryComparison gitRepository in _appConfiguration.GitConfiguration.GitRepositoryComparisons)
                 {
                     CompareFeaturesInRepository(gitRepository, out IEnumerable<Issue> missingFeatures, out IList<string> unknownFeatures);
+                    IEnumerable<Issue> unplannedMissingIssues = FindUnplannedFeatures(missingFeatures);
                     missingFeaturesDictionary.Add(gitRepository.RepositoryName, missingFeatures);
                     unknownFeaturesDictionary.Add(gitRepository.RepositoryName, unknownFeatures);
+                    unplannedMissingFeaturesDictionary.Add(gitRepository.RepositoryName, unplannedMissingIssues);
                 }
 
                 // generate file
-                GenerateComparisonNote(_appConfiguration.RedmineConfiguration.ComparisonNoteFileName, missingFeaturesDictionary, unknownFeaturesDictionary);
+                GenerateComparisonNote(_appConfiguration.RedmineConfiguration.ComparisonNoteFileName, unplannedMissingFeaturesDictionary, unknownFeaturesDictionary);
             }
             catch (Exception ex)
             {
@@ -128,6 +130,26 @@ namespace FeatureComparator
             missingFeatures = featuresCompareFrom.Where(issueFrom => !featuresCompareTo.Any(issueTo => issueTo.Id == issueFrom.Id));
 
             _logger.LogInformation($"End comparing features for git repo '{gitRepository.RepositoryName}', from branch '{gitRepository.CompareFrom.BranchName}' to branch '{gitRepository.CompareTo.BranchName}':");
+        }
+
+        private IEnumerable<Issue> FindUnplannedFeatures(IEnumerable<Issue> missingFeatures)
+        {
+            List<Issue> unplannedFeatures = new();
+            foreach (Issue missingFeature in missingFeatures)
+            {
+                // there should be a planned task (child of the issue) with a specific subject for any missing feature
+                IssueChild? plannedTask = missingFeature.Children?.FirstOrDefault(_childIssue => _appConfiguration.RedmineConfiguration.PlannedFeatureSubjects.Any(_S => _childIssue.Subject.Contains(_S)));
+                if (plannedTask is not null)
+                { 
+                    // the planned task must obviously be an open issue, so we have to fetch more details
+                    if (TryGetIssueFromOpenIssues(plannedTask.Id.ToString(), out Issue? detailedPlannedTask))
+                        if(detailedPlannedTask.Status.Id == 1)
+                            continue; // this is a planned feature, so we can skip it
+                }
+                // if we found no open planned task, then it is an unplanned feature
+                unplannedFeatures.Add(missingFeature);
+            }
+            return unplannedFeatures;
         }
 
         private Repository GetRepositoryCompareFrom(string gitRepositoryName)
@@ -375,27 +397,27 @@ namespace FeatureComparator
         {
             var parameters = new NameValueCollection
             {
-                { RedmineKeys.ISSUE_ID, targetIssueId }
+                { RedmineKeys.INCLUDE, RedmineKeys.CHILDREN }
             };
-            return TryGetIssue(parameters, out foundIssue);
+            return TryGetIssue(targetIssueId, parameters, out foundIssue);
         }
 
         private bool TryGetIssueFromClosedIssues(string targetIssueId, out Issue? foundIssue)
         {
             var parameters = new NameValueCollection
             {
-                { RedmineKeys.ISSUE_ID, targetIssueId },
-                { RedmineKeys.STATUS_ID, "closed" }
+                { RedmineKeys.STATUS_ID, RedmineKeys.IS_CLOSED },
+                { RedmineKeys.INCLUDE, RedmineKeys.CHILDREN }
             };
-            return TryGetIssue(parameters, out foundIssue);
+            return TryGetIssue(targetIssueId, parameters, out foundIssue);
         }
 
-        private bool TryGetIssue(NameValueCollection parameters, out Issue? foundIssue)
+        private bool TryGetIssue(string targetIssueId, NameValueCollection? parameters, out Issue? foundIssue)
         {
             foundIssue = null;
             try
             {
-                foundIssue = _manager.GetObjects<Issue>(parameters)?.FirstOrDefault();
+                foundIssue = _manager.GetObject<Issue>(targetIssueId, parameters);
                 if (foundIssue is not null)
                     return true;
             }
