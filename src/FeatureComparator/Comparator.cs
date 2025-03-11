@@ -69,25 +69,31 @@ namespace FeatureComparator
                 // pull or clone git repository
                 foreach (GitRepositoryComparison gitRepository in _appConfiguration.GitConfiguration.GitRepositoryComparisons)
                 {
-                    // pull compareFrom branch
-                    string repositoryCompareFromName = GetRepositoryCompareFromName(gitRepository.RepositoryName);
-                    Repository repositoryCompareFrom = CloneOrPullRepository(
-                        gitRepository.RepositoryName,
-                        gitRepository.CompareFrom.BranchName,
-                        GetRepositoryGitTempPath(repositoryCompareFromName),
-                        GetRepositoryUrl(gitRepository.RepositoryName),
-                        credentials);
-                    _gitRepositoryDictionary.Add(repositoryCompareFromName, repositoryCompareFrom);
+                    // pull compareFrom branches
+                    foreach (string compareFromBranchName in gitRepository.CompareFrom.BranchesName)
+                    {
+                        string repositoryCompareFromName = GetRepositoryCompareFromName(gitRepository.RepositoryName, compareFromBranchName);
+                        Repository repositoryCompareFrom = CloneOrPullRepository(
+                            gitRepository.RepositoryName,
+                            compareFromBranchName,
+                            GetRepositoryGitTempPath(repositoryCompareFromName, compareFromBranchName),
+                            GetRepositoryUrl(gitRepository.RepositoryName),
+                            credentials);
+                        _gitRepositoryDictionary.Add(repositoryCompareFromName, repositoryCompareFrom);
+                    }
 
-                    // pull compareTo branch
-                    string repositoryCompareToName = GetRepositoryCompareToName(gitRepository.RepositoryName);
-                    Repository repositoryCompareTo = CloneOrPullRepository(
-                        gitRepository.RepositoryName,
-                        gitRepository.CompareFrom.BranchName,
-                        GetRepositoryGitTempPath(repositoryCompareToName),
-                        GetRepositoryUrl(gitRepository.RepositoryName),
-                        credentials);
-                    _gitRepositoryDictionary.Add(repositoryCompareToName, repositoryCompareTo);
+                    // pull compareTo branches
+                    foreach (string compareToBranchName in gitRepository.CompareTo.BranchesName)
+                    {
+                        string repositoryCompareToName = GetRepositoryCompareToName(gitRepository.RepositoryName, compareToBranchName);
+                        Repository repositoryCompareTo = CloneOrPullRepository(
+                            gitRepository.RepositoryName,
+                            compareToBranchName,
+                            GetRepositoryGitTempPath(repositoryCompareToName, compareToBranchName),
+                            GetRepositoryUrl(gitRepository.RepositoryName),
+                            credentials);
+                        _gitRepositoryDictionary.Add(repositoryCompareToName, repositoryCompareTo);
+                    }
                 }
 
                 Dictionary<string, IEnumerable<Issue>> missingFeaturesDictionary = new(); // features that are missing in the compareTo repository
@@ -97,7 +103,7 @@ namespace FeatureComparator
                 // compare features in each repository
                 foreach (GitRepositoryComparison gitRepository in _appConfiguration.GitConfiguration.GitRepositoryComparisons)
                 {
-                    CompareFeaturesInRepository(gitRepository, out IEnumerable<Issue> missingFeatures, out IList<string> unknownFeatures);
+                    CompareFeaturesInRepository(gitRepository, out IEnumerable<Issue> missingFeatures, out List<string> unknownFeatures);
                     IEnumerable<Issue> unplannedMissingIssues = FindUnplannedFeatures(missingFeatures);
                     missingFeaturesDictionary.Add(gitRepository.RepositoryName, missingFeatures);
                     unknownFeaturesDictionary.Add(gitRepository.RepositoryName, unknownFeatures);
@@ -113,23 +119,45 @@ namespace FeatureComparator
             }
         }
 
-        private void CompareFeaturesInRepository(GitRepositoryComparison gitRepository, out IEnumerable<Issue> missingFeatures, out IList<string> unknownFeatures)
+        private void CompareFeaturesInRepository(GitRepositoryComparison gitRepository, out IEnumerable<Issue> missingFeatures, out List<string> unknownFeatures)
         {
-            _logger.LogInformation($"Start comparing features for git repo '{gitRepository.RepositoryName}', from branch '{gitRepository.CompareFrom.BranchName}' to branch '{gitRepository.CompareTo.BranchName}':");
-
-            using Repository repositoryCompareFrom = GetRepositoryCompareFrom(gitRepository.RepositoryName);
-            using Repository repositoryCompareTo = GetRepositoryCompareTo(gitRepository.RepositoryName);
+            _logger.LogInformation($"Start comparing features for git repo '{gitRepository.RepositoryName}', from branches '{string.Join(", ", gitRepository.CompareFrom.BranchesName)}' to branches '{string.Join(", ", gitRepository.CompareTo.BranchesName)}':");
 
             // get merge commits
-            IEnumerable<Commit> commitsCompareFrom = GetMergingCommits(gitRepository.RepositoryName, gitRepository.CommitStartSha, gitRepository.CompareFrom.BranchName, repositoryCompareFrom);
-            IEnumerable<Commit> commitsCompareTo = GetMergingCommits(gitRepository.RepositoryName, gitRepository.CommitStartSha, gitRepository.CompareTo.BranchName, repositoryCompareTo);
+            List<Commit> commitsCompareFrom = new();
+            List<Commit> commitsCompareTo = new();
+            List<Issue> featuresCompareFrom = new();
+            List<Issue> featuresCompareTo = new();
+            unknownFeatures = new List<string>();
+            foreach (string compareFromBranch in gitRepository.CompareFrom.BranchesName)
+            {
+                using Repository repositoryCompareFrom = GetRepositoryCompareFrom(gitRepository.RepositoryName, compareFromBranch);
+                commitsCompareFrom.AddRange(GetMergingCommits(
+                    gitRepository.RepositoryName,
+                    gitRepository.CommitStartSha,
+                    compareFromBranch,
+                    repositoryCompareFrom));
+                featuresCompareFrom.AddRange(GetFeatures(GetRepositoryCompareFromName(gitRepository.RepositoryName, compareFromBranch), commitsCompareFrom, out IList<string> _unknownFeatures));
+                unknownFeatures.AddRange(_unknownFeatures);
+            }
+            featuresCompareFrom = featuresCompareFrom.DistinctBy(_C => _C.Id).ToList(); // keep only one feature sample per comparison
+            unknownFeatures = unknownFeatures.Distinct().ToList();
 
-            IList<Issue> featuresCompareFrom = GetFeatures(GetRepositoryCompareFromName(gitRepository.RepositoryName), commitsCompareFrom, out unknownFeatures);
-            IList<Issue> featuresCompareTo = GetFeatures(GetRepositoryCompareToName(gitRepository.RepositoryName), commitsCompareTo, out _);
+            foreach (string compareToBranch in gitRepository.CompareTo.BranchesName)
+            {
+                using Repository repositoryCompareTo = GetRepositoryCompareTo(gitRepository.RepositoryName, compareToBranch);
+                commitsCompareTo.AddRange(GetMergingCommits(
+                    gitRepository.RepositoryName,
+                    gitRepository.CommitStartSha,
+                    compareToBranch,
+                    repositoryCompareTo));
+                featuresCompareTo.AddRange(GetFeatures(GetRepositoryCompareToName(gitRepository.RepositoryName, compareToBranch), commitsCompareTo, out _));
+            }
+            featuresCompareTo = featuresCompareTo.DistinctBy(_C => _C.Id).ToList(); // keep only one feature sample per comparison
 
             missingFeatures = featuresCompareFrom.Where(issueFrom => !featuresCompareTo.Any(issueTo => issueTo.Id == issueFrom.Id));
 
-            _logger.LogInformation($"End comparing features for git repo '{gitRepository.RepositoryName}', from branch '{gitRepository.CompareFrom.BranchName}' to branch '{gitRepository.CompareTo.BranchName}':");
+            _logger.LogInformation($"End comparing features for git repo '{gitRepository.RepositoryName}', from branches '{string.Join(", ", gitRepository.CompareFrom.BranchesName)}' to branches '{string.Join(", ", gitRepository.CompareTo.BranchesName)}':");
         }
 
         private IEnumerable<Issue> FindUnplannedFeatures(IEnumerable<Issue> missingFeatures)
@@ -140,10 +168,10 @@ namespace FeatureComparator
                 // there should be a planned task (child of the issue) with a specific subject for any missing feature
                 IssueChild? plannedTask = missingFeature.Children?.FirstOrDefault(_childIssue => _appConfiguration.RedmineConfiguration.PlannedFeatureSubjects.Any(_S => _childIssue.Subject.Contains(_S)));
                 if (plannedTask is not null)
-                { 
+                {
                     // the planned task must obviously be an open issue, so we have to fetch more details
                     if (TryGetIssueFromOpenIssues(plannedTask.Id.ToString(), out Issue? detailedPlannedTask))
-                        if(detailedPlannedTask.Status.Id == 1)
+                        if (detailedPlannedTask.Status.Id == 1)
                             continue; // this is a planned feature, so we can skip it
                 }
                 // if we found no open planned task, then it is an unplanned feature
@@ -152,15 +180,15 @@ namespace FeatureComparator
             return unplannedFeatures;
         }
 
-        private Repository GetRepositoryCompareFrom(string gitRepositoryName)
+        private Repository GetRepositoryCompareFrom(string gitRepositoryName, string branchName)
         {
-            string repositoryFromName = GetRepositoryCompareFromName(gitRepositoryName);
+            string repositoryFromName = GetRepositoryCompareFromName(gitRepositoryName, branchName);
             return GetRepository(repositoryFromName);
         }
 
-        private Repository GetRepositoryCompareTo(string gitRepositoryName)
+        private Repository GetRepositoryCompareTo(string gitRepositoryName, string branchName)
         {
-            string repositoryToName = GetRepositoryCompareToName(gitRepositoryName);
+            string repositoryToName = GetRepositoryCompareToName(gitRepositoryName, branchName);
             return GetRepository(repositoryToName);
         }
 
@@ -194,7 +222,7 @@ namespace FeatureComparator
             Commit? startCommit = gitRepository.Commits.FirstOrDefault(_C => _C.Sha == gitCommitStartSha);
             if (startCommit == null)
             {
-                _logger.LogError($"Repository '{gitRepositoryName}': Could not find start commit with SHA {gitCommitStartSha}, which will be skipped during generation.");
+                _logger.LogError($"Repository '{gitRepositoryName}', branch name '{gitBranchName}': Could not find start commit with SHA {gitCommitStartSha}, which will be skipped during generation.");
                 return Enumerable.Empty<Commit>();
             }
 
@@ -357,19 +385,19 @@ namespace FeatureComparator
             return _appConfiguration.GitConfiguration.RepositoryUrlPrefix + gitRepoName + GitRepositoryExtension;
         }
 
-        private string GetRepositoryGitTempPath(string gitRepoName)
+        private string GetRepositoryGitTempPath(string gitRepoName, string branchName)
         {
-            return Path.Combine(_repoCloneTmpDirectory, gitRepoName);
+            return Path.Combine(_repoCloneTmpDirectory, gitRepoName, branchName);
         }
 
-        private string GetRepositoryCompareFromName(string gitRepoName)
+        private string GetRepositoryCompareFromName(string gitRepoName, string branchName)
         {
-            return Path.Combine(gitRepoName, CompareFromFolderName);
+            return Path.Combine(gitRepoName, CompareFromFolderName, branchName);
         }
 
-        private string GetRepositoryCompareToName(string gitRepoName)
+        private string GetRepositoryCompareToName(string gitRepoName, string branchName)
         {
-            return Path.Combine(gitRepoName, CompareToFolderName);
+            return Path.Combine(gitRepoName, CompareToFolderName, branchName);
         }
 
         #endregion
@@ -450,7 +478,9 @@ namespace FeatureComparator
                     content += Environment.NewLine;
                     content += $"- Missing features:";
                     content += Environment.NewLine;
-                    foreach (Issue redmineIssue in missingFeaturesDictionary[gitRepoName].OrderBy(_I => _I.Tracker.Name))
+                    foreach (Issue redmineIssue in missingFeaturesDictionary[gitRepoName]
+                        .OrderByDescending(_I => _I.Id)
+                        .OrderBy(_I => _I.Tracker.Name))
                     {
                         content += this.IssueToString(redmineIssue);
                         content += Environment.NewLine;

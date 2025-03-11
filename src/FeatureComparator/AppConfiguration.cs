@@ -34,6 +34,6 @@
 
     internal class BranchComparison
     {
-        public string BranchName { get; set; } = null!;
+        public List<string> BranchesName { get; set; } = null!;
     }
 }

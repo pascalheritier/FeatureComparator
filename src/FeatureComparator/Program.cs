@@ -37,6 +37,8 @@ namespace GitCommitRetriever
             {
                 LogManager.GetCurrentClassLogger().Log(NLog.LogLevel.Fatal, $"Critical app failure: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             }
+            Console.WriteLine("Program is now ended, press any key to close the window.");
+            Console.ReadKey();
         }
 
         #endregion
