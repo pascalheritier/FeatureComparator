@@ -1,12 +1,10 @@
-﻿using LibGit2Sharp;
+﻿using ExcelDataReader;
+using LibGit2Sharp;
 using Microsoft.Extensions.Logging;
-using Newtonsoft.Json.Linq;
-using NLog.Extensions.Logging;
 using Redmine.Net.Api;
 using Redmine.Net.Api.Types;
 using System.Collections.Specialized;
-using System.IO;
-using System.Net;
+using System.Data;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -21,6 +19,8 @@ namespace FeatureComparator
 
         private const string CompareFromFolderName = "from";
         private const string CompareToFolderName = "to";
+
+        public const string GitRepoNameIdentifier = "## ";
 
         #endregion
 
@@ -110,7 +110,10 @@ namespace FeatureComparator
                     unplannedMissingFeaturesDictionary.Add(gitRepository.RepositoryName, unplannedMissingIssues);
                 }
 
-                // generate file
+                // filter out features that are already in the existing comparison file
+                 FilterOutExistingEntries(_appConfiguration.ComparisonFileConfiguration.FilePath, unplannedMissingFeaturesDictionary, unknownFeaturesDictionary);
+
+                // generate comparison file
                 GenerateComparisonNote(_appConfiguration.RedmineConfiguration.ComparisonNoteFileName, unplannedMissingFeaturesDictionary, unknownFeaturesDictionary);
             }
             catch (Exception ex)
@@ -474,7 +477,7 @@ namespace FeatureComparator
                 string content;
                 foreach (string gitRepoName in missingFeaturesDictionary.Keys)
                 {
-                    content = $"## {gitRepoName.FirstCharToUpper()}";
+                    content = $"{GitRepoNameIdentifier}{gitRepoName.FirstCharToUpper()}";
                     content += Environment.NewLine;
                     content += $"- Missing features:";
                     content += Environment.NewLine;
@@ -498,6 +501,69 @@ namespace FeatureComparator
                     fs.Write(info, 0, info.Length);
                 }
             }
+        }
+
+        #endregion
+
+        #region Comparison file helpers
+
+        private void FilterOutExistingEntries(
+            string comparisonFilePath,
+            IDictionary<string, IEnumerable<Issue>> missingFeaturesDictionary,
+            IDictionary<string, IEnumerable<string>> unknownFeaturesDictionary)
+        {
+            if (comparisonFilePath is null)
+                return;
+
+            // get missing features already registered in file
+            IDictionary<string, List<string>> existingFeatures = GetFileContent(comparisonFilePath);
+            // filter out registered missing features from dictionaries
+            foreach (string gitRepoName in missingFeaturesDictionary.Keys)
+            {
+                missingFeaturesDictionary[gitRepoName] = missingFeaturesDictionary[gitRepoName].Where(_I => !existingFeatures[gitRepoName].Any(_F => _F.Contains(_I.Id.ToString()))).ToArray();
+                unknownFeaturesDictionary[gitRepoName] = unknownFeaturesDictionary[gitRepoName].Where(_U => !existingFeatures[gitRepoName].Any(_F => _F.Contains(_U))).ToArray();
+            }
+        }
+
+        private IDictionary<string, List<string>> GetFileContent(string comparisonFilePath)
+        {
+            Dictionary<string, List<string>> comparisonFileContent = new();
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+            using (var stream = System.IO.File.Open(comparisonFilePath, FileMode.Open, FileAccess.Read))
+            {
+                using (var reader = ExcelReaderFactory.CreateReader(stream))
+                {
+                    DataSet result = reader.AsDataSet(); // Convert to DataSet
+                    DataTable table = result.Tables[0]; // Read first worksheet
+
+                    string currentGitRepoName = null;
+                    foreach (DataRow row in table.Rows)
+                    {
+                        string? currentRowItem = row.ItemArray[0]?.ToString(); // only the first column is of interest to us
+                        if (currentRowItem is null)
+                            continue;
+                        if (currentRowItem.Contains(GitRepoNameIdentifier))
+                        {
+                            currentGitRepoName = GetGitRepoNameFromCell(currentRowItem);
+                            continue;
+                        }
+                        if (currentGitRepoName is null)
+                            continue; // we do not register item since we have not found any repo yet
+                        if (comparisonFileContent.ContainsKey(currentGitRepoName))
+                            comparisonFileContent[currentGitRepoName].Add(currentRowItem);
+                        else
+                            comparisonFileContent.Add(currentGitRepoName, new List<string> { currentRowItem });
+                    }
+                }
+            }
+            return comparisonFileContent;
+        }
+
+        private string GetGitRepoNameFromCell(string input)
+        {
+            string pattern = @$"(?<={GitRepoNameIdentifier})\w+"; // Regex to extract text after the identifier
+            Match match = Regex.Match(input, pattern);
+            return  match.Value.ToLower();
         }
 
         #endregion

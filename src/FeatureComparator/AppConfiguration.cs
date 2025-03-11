@@ -4,6 +4,7 @@
     {
         public GitConfiguration GitConfiguration { get; set; } = new();
         public RedmineConfiguration RedmineConfiguration { get; set; } = new();
+        public ComparisonFileConfiguration ComparisonFileConfiguration { get; set; } = new();
     }
 
     internal class RedmineConfiguration
@@ -35,5 +36,10 @@
     internal class BranchComparison
     {
         public List<string> BranchesName { get; set; } = null!;
+    }
+
+    internal class ComparisonFileConfiguration
+    {
+        public string FilePath { get; set; }
     }
 }
