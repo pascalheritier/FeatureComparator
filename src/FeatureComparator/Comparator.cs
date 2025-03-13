@@ -97,6 +97,7 @@ namespace FeatureComparator
                 }
 
                 Dictionary<string, IEnumerable<Issue>> missingFeaturesDictionary = new(); // features that are missing in the compareTo repository
+                Dictionary<string, IEnumerable<Issue>> plannedMissingFeaturesDictionary = new(); // features that are missing in the compareTo repository and are planned for future development
                 Dictionary<string, IEnumerable<Issue>> unplannedMissingFeaturesDictionary = new(); // features that are missing in the compareTo repository and are unplanned for future development
                 Dictionary<string, IEnumerable<string>> unknownFeaturesDictionary = new(); // features merged in the compareFrom repository but that have no Redmine equivalence
 
@@ -108,13 +109,16 @@ namespace FeatureComparator
                     missingFeaturesDictionary.Add(gitRepository.RepositoryName, missingFeatures);
                     unknownFeaturesDictionary.Add(gitRepository.RepositoryName, unknownFeatures);
                     unplannedMissingFeaturesDictionary.Add(gitRepository.RepositoryName, unplannedMissingIssues);
+                    plannedMissingFeaturesDictionary.Add(gitRepository.RepositoryName, missingFeatures.Except(unplannedMissingIssues));
                 }
 
                 // filter out features that are already in the existing comparison file
-                 FilterOutExistingEntries(_appConfiguration.ComparisonFileConfiguration.FilePath, unplannedMissingFeaturesDictionary, unknownFeaturesDictionary);
+                FilterOutExistingEntries(_appConfiguration.ComparisonFileConfiguration.ExistingUnplannedTasksFilePath, unplannedMissingFeaturesDictionary, unknownFeaturesDictionary);
 
-                // generate comparison file
-                GenerateComparisonNote(_appConfiguration.RedmineConfiguration.ComparisonNoteFileName, unplannedMissingFeaturesDictionary, unknownFeaturesDictionary);
+                // generate comparison files
+                GenerateComparisonNote(_appConfiguration.ComparisonFileConfiguration.PlannedTasksFilePath, plannedMissingFeaturesDictionary);
+                GenerateComparisonNote(_appConfiguration.ComparisonFileConfiguration.UnplannedTasksFilePath, unplannedMissingFeaturesDictionary, unknownFeaturesDictionary);
+                GenerateDigest(_appConfiguration.ComparisonFileConfiguration.PlannedTasksDigestFilePath, plannedMissingFeaturesDictionary);
             }
             catch (Exception ex)
             {
@@ -174,8 +178,10 @@ namespace FeatureComparator
                 {
                     // the planned task must obviously be an open issue, so we have to fetch more details
                     if (TryGetIssueFromOpenIssues(plannedTask.Id.ToString(), out Issue? detailedPlannedTask))
-                        if (detailedPlannedTask.Status.Id == 1)
-                            continue; // this is a planned feature, so we can skip it
+                    {
+                        if (detailedPlannedTask.Status.Id == 1 || detailedPlannedTask.Status.Id == 2)
+                            continue; // this is a planned or currently in development feature, so we can skip it
+                    }
                 }
                 // if we found no open planned task, then it is an unplanned feature
                 unplannedFeatures.Add(missingFeature);
@@ -465,14 +471,14 @@ namespace FeatureComparator
         }
 
         private void GenerateComparisonNote(
-            string comparisonNotefileName,
+            string comparisonNotefilePath,
             IDictionary<string, IEnumerable<Issue>> missingFeaturesDictionary,
-            IDictionary<string, IEnumerable<string>> unknownFeaturesDictionary)
+            IDictionary<string, IEnumerable<string>>? unknownFeaturesDictionary = null)
         {
-            if (System.IO.File.Exists(comparisonNotefileName))
-                System.IO.File.Delete(comparisonNotefileName);
+            if (System.IO.File.Exists(comparisonNotefilePath))
+                System.IO.File.Delete(comparisonNotefilePath);
 
-            using (FileStream fs = System.IO.File.Create(comparisonNotefileName))
+            using (FileStream fs = System.IO.File.Create(comparisonNotefilePath))
             {
                 string content;
                 foreach (string gitRepoName in missingFeaturesDictionary.Keys)
@@ -490,16 +496,43 @@ namespace FeatureComparator
                     }
                     content += $"- Unknown features:";
                     content += Environment.NewLine;
-                    foreach (string unknownFeature in unknownFeaturesDictionary[gitRepoName])
+                    if (unknownFeaturesDictionary is not null)
                     {
-                        content += $" - {unknownFeature}";
+                        foreach (string unknownFeature in unknownFeaturesDictionary[gitRepoName])
+                        {
+                            content += $" - {unknownFeature}";
+                            content += Environment.NewLine;
+                        }
                         content += Environment.NewLine;
                     }
-                    content += Environment.NewLine;
 
                     byte[] info = new UTF8Encoding(true).GetBytes(content);
                     fs.Write(info, 0, info.Length);
                 }
+            }
+        }
+
+        private void GenerateDigest(
+            string digestFilePath,
+            IDictionary<string, IEnumerable<Issue>> missingFeaturesDictionary)
+        {
+            IEnumerable<Issue> issues = missingFeaturesDictionary.Values.SelectMany(_A => _A).DistinctBy(_I => _I.Id);
+
+            if (System.IO.File.Exists(digestFilePath))
+                System.IO.File.Delete(digestFilePath);
+
+            using (FileStream fs = System.IO.File.Create(digestFilePath))
+            {
+                string content = string.Empty;
+                foreach (Issue issue in issues)
+                {
+                    content += $"{_appConfiguration.RedmineConfiguration.ServerUrl}/issues/{issue.Id}";
+                    content += Environment.NewLine;
+                }
+
+
+                byte[] info = new UTF8Encoding(true).GetBytes(content);
+                fs.Write(info, 0, info.Length);
             }
         }
 
@@ -563,7 +596,7 @@ namespace FeatureComparator
         {
             string pattern = @$"(?<={GitRepoNameIdentifier})\w+"; // Regex to extract text after the identifier
             Match match = Regex.Match(input, pattern);
-            return  match.Value.ToLower();
+            return match.Value.ToLower();
         }
 
         #endregion

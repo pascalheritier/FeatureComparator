@@ -12,7 +12,6 @@
         public string ServerUrl { get; set; } = null!;
         public string ApiKey { get; set; } = null!;
         public string TargetUserId { get; set; } = null!;
-        public string ComparisonNoteFileName { get; set; } = null!;
         public List<string> PlannedFeatureSubjects { get; set; } = null!;
     }
 
@@ -40,6 +39,9 @@
 
     internal class ComparisonFileConfiguration
     {
-        public string FilePath { get; set; }
+        public string PlannedTasksFilePath { get; set; } = null!;
+        public string PlannedTasksDigestFilePath { get; set; } = null!;
+        public string UnplannedTasksFilePath { get; set; } = null!;
+        public string ExistingUnplannedTasksFilePath { get; set; } = null!;
     }
 }
